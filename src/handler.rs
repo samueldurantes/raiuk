@@ -5,6 +5,7 @@ use tokio::{
   sync::{broadcast::Sender, RwLock}
 };
 
+#[derive(Debug, Clone)]
 pub struct User {
   pub name: String,
   pub addr: SocketAddr,
@@ -16,13 +17,25 @@ impl User {
   }
 }
 
+#[derive(Debug, Clone)]
+pub struct Message {
+  pub content: String,
+  pub sender: User,
+}
+
+impl Message {
+  pub fn new(content: &str, sender: User) -> Self {
+    Message { content: content.to_owned(), sender }
+  }
+}
+
 pub type Channel = Arc<RwLock<HashMap<SocketAddr, User>>>;
 
 pub async fn handle_connection(
-  mut socket: TcpStream, 
-  addr: SocketAddr, 
-  channel: Channel, 
-  sender: Sender<String>,
+  mut socket: TcpStream,
+  addr: SocketAddr,
+  channel: Channel,
+  sender: Sender<Message>,
 ) {
   println!("New connection: {}", addr);
 
@@ -35,28 +48,41 @@ pub async fn handle_connection(
 
     tokio::select! {
       message = receiver.recv() => {
-        if let Ok(message) = message {
-          s.write(message.as_bytes()).await.unwrap();
+        let message = message.unwrap();
+
+        if message.sender.addr == addr {
+          continue;
         }
+
+        s.write(message.content.as_bytes()).await.unwrap();
       }
 
       result = reader.read_line(&mut message) => {
         let mut channel = channel.write().await;
-        
+
         match result {
           Ok(_) => {
             match channel.get(&addr) {
               Some(user) => {
-                let message = message.trim_end();
+                let message = Message::new(
+                  &format!("[{}] {}\n", user.name, message.trim_end()),
+                  user.to_owned(),
+                );
 
-                sender.send(format!("[{}] {}\n", user.name, message)).unwrap();
+                sender.send(message).unwrap();
               },
-              None => {                
+              None => {
                 let name = message.trim_end();
+                let new_user = User::new(name, addr);
 
-                channel.insert(addr, User::new(name, addr));
+                channel.insert(addr, new_user.clone());
 
-                sender.send(format!("{} join\n", name)).unwrap();
+                let message = Message::new(
+                  &format!("{} join\n", new_user.name),
+                  new_user,
+                );
+
+                sender.send(message).unwrap();
               },
             }
           },
